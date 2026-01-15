@@ -19,6 +19,82 @@ from ..state import get_run_context
 logger = structlog.get_logger("timbal.tools.edit")
 
 
+def _resolve_path(path: str) -> Path:
+    """Resolve a file path with context-aware security."""
+    run_context = get_run_context()
+    if run_context:
+        return run_context.resolve_cwd(path)
+    return Path(os.path.expandvars(os.path.expanduser(path))).resolve()
+
+
+def _validate_edit_inputs(old_string: str, new_string: str, path: Path) -> None:
+    """Validate edit operation inputs."""
+    if old_string == new_string:
+        raise ValueError("No changes made - old_string and new_string are identical")
+    
+    if not path.exists():
+        raise FileNotFoundError(f"File does not exist: {path}")
+    
+    if path.is_dir():
+        raise ValueError(f"Path is a directory, not a file: {path}")
+
+
+def _verify_file_state(path: Path) -> None:
+    """Verify file has been read and hasn't been modified."""
+    run_context = get_run_context()
+    if not run_context or not hasattr(run_context, "_fs_state"):
+        return
+    
+    # Check if file has been read
+    if str(path) not in run_context._fs_state:
+        raise FileNotReadError(
+            f"Cannot edit {path} - file has not been read in this conversation. "
+            f"Please read the file first to understand its current state."
+        )
+    
+    # Verify file hasn't changed
+    original_bytes = path.read_bytes()
+    current_hash = hashlib.sha256(original_bytes).hexdigest()
+    stored_hash = run_context._fs_state[str(path)]
+    
+    if stored_hash and current_hash != stored_hash:
+        raise FileModifiedError(
+            f"Cannot edit {path} - file has been modified since you last read it. "
+            f"Please read the file again to see the current state."
+        )
+
+
+def _perform_replacement(content: str, old_string: str, new_string: str, replace_all: bool) -> str:
+    """Perform string replacement in content."""
+    if old_string not in content:
+        raise ValueError(f"String not found in file: '{old_string}'")
+    
+    if replace_all:
+        return content.replace(old_string, new_string)
+    return content.replace(old_string, new_string, 1)
+
+
+def _generate_edit_diff(original_content: str, new_content: str, filename: str) -> str:
+    """Generate a unified diff for edit operation."""
+    diff_lines = list(difflib.unified_diff(
+        original_content.splitlines(keepends=False),
+        new_content.splitlines(keepends=False),
+        fromfile=f"a/{filename}",
+        tofile=f"b/{filename}",
+        lineterm="",
+        n=3
+    ))
+    return "\n".join(diff_lines)
+
+
+def _update_file_state(path: Path, content: str) -> None:
+    """Update file state tracking in run context."""
+    run_context = get_run_context()
+    if run_context and hasattr(run_context, "_fs_state"):
+        new_hash = hashlib.sha256(content.encode("utf-8")).hexdigest()
+        run_context._fs_state[str(path)] = new_hash
+
+
 class Edit(Tool):
 
     # TODO Add parameter to limit permissions to a specific path

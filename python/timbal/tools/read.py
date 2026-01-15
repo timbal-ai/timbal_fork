@@ -18,6 +18,36 @@ from ..types.file import File
 logger = structlog.get_logger("timbal.tools.read")
 
 
+def _resolve_path(path: str) -> Path:
+    """Resolve a file path with context-aware security."""
+    run_context = get_run_context()
+    if run_context:
+        return run_context.resolve_cwd(path)
+    return Path(os.path.expandvars(os.path.expanduser(path))).resolve()
+
+
+def _validate_line_range(start_line: int | None, end_line: int | None) -> None:
+    """Validate line range parameters."""
+    if start_line is not None and start_line < 1:
+        raise ValueError("start_line must be >= 1 (1-indexed)")
+    if end_line is not None and end_line < 1:
+        raise ValueError("end_line must be >= 1 (1-indexed)")
+    if start_line is not None and end_line is not None and start_line > end_line:
+        raise ValueError(f"start_line ({start_line}) must be <= end_line ({end_line})")
+
+
+def _update_file_state(path: Path, content: bytes | str) -> None:
+    """Update file state tracking in run context."""
+    run_context = get_run_context()
+    if run_context and hasattr(run_context, "_fs_state"):
+        if isinstance(content, str):
+            content_bytes = content.encode("utf-8")
+        else:
+            content_bytes = content
+        new_hash = hashlib.sha256(content_bytes).hexdigest()
+        run_context._fs_state[str(path)] = new_hash
+
+
 class Read(Tool):
 
     def __init__(self, **kwargs):
@@ -38,62 +68,27 @@ class Read(Tool):
             Returns:
                 File object with content (optionally sliced to line range)
             """
-            run_context = get_run_context()
-            # Resolve path with base_path security if run_context exists
-            if run_context:
-                path = run_context.resolve_cwd(path)
-            else:
-                # No run context - just expand and resolve normally
-                path = Path(os.path.expandvars(os.path.expanduser(path))).resolve()
+            _validate_line_range(start_line, end_line)
+            resolved_path = _resolve_path(path)
 
-            if not path.exists():
-                raise FileNotFoundError(f"File does not exist: {path}")
-            if path.is_dir():
-                contents = "\n".join(item.name for item in path.iterdir())
-                if not contents:
-                    return "Empty directory"
-                return contents
+            if not resolved_path.exists():
+                raise FileNotFoundError(f"File does not exist: {resolved_path}")
+            
+            if resolved_path.is_dir():
+                return _read_directory(resolved_path)
 
-            # Update file state tracking with new hash
-            if run_context and hasattr(run_context, "_fs_state"):
-                new_hash = hashlib.sha256(path.read_bytes()).hexdigest()
-                run_context._fs_state[str(path)] = new_hash
+            file = File.validate(resolved_path)
+            _update_file_state(resolved_path, resolved_path.read_bytes())
 
-            file = File.validate(path)
-
-            # These are file types that are not text and handled specially by Timbal FileContent
-            if file.__source_extension__ in [".xlsx", ".eml", ".docx"]:
-                return file
-            elif file.__content_type__.startswith("image/"):
-                return file
-            elif file.__content_type__.startswith("audio/"):
-                return file
-            elif file.__content_type__ == "application/pdf":
+            # Handle special file types that are not plain text
+            if _is_special_file_type(file):
                 return file
 
-            # ? Enable multiple encodings
+            # Read full file or specific line range
             if start_line is None and end_line is None:
                 return file.read().decode("utf-8")
 
-            # Read the specified line range efficiently
-            with open(path, encoding="utf-8") as f:
-                # Calculate slice parameters (convert from 1-indexed to 0-indexed)
-                start_idx = (start_line - 1) if start_line is not None else 0
-                # Calculate how many lines to read
-                if end_line is not None:
-                    if start_line is not None:
-                        num_lines = end_line - start_line + 1
-                    else:
-                        num_lines = end_line
-                else:
-                    num_lines = None  # Read until end
-                # Use islice for efficient line reading
-                # Skip lines before start_idx, then take num_lines
-                lines = list(islice(f, start_idx, start_idx + num_lines if num_lines else None))
-
-            # Return empty string if no lines found (out of range)
-            content = ''.join(lines)
-            return content if content else ""
+            return _read_line_range(resolved_path, start_line, end_line)
             
         super().__init__(
             name="read",
@@ -101,3 +96,40 @@ class Read(Tool):
             handler=_read,
             **kwargs
         )
+
+
+def _read_directory(path: Path) -> str:
+    """Read directory contents."""
+    contents = "\n".join(item.name for item in path.iterdir())
+    return contents if contents else "Empty directory"
+
+
+def _is_special_file_type(file: File) -> bool:
+    """Check if file is a special type that should be returned as File object."""
+    special_extensions = [".xlsx", ".eml", ".docx"]
+    special_content_types = ["image/", "audio/", "application/pdf"]
+    
+    if file.__source_extension__ in special_extensions:
+        return True
+    if any(file.__content_type__.startswith(ct) for ct in special_content_types):
+        return True
+    return False
+
+
+def _read_line_range(path: Path, start_line: int | None, end_line: int | None) -> str:
+    """Read a specific line range from a file."""
+    with open(path, encoding="utf-8") as f:
+        start_idx = (start_line - 1) if start_line is not None else 0
+        
+        if end_line is not None:
+            if start_line is not None:
+                num_lines = end_line - start_line + 1
+            else:
+                num_lines = end_line
+        else:
+            num_lines = None
+        
+        lines = list(islice(f, start_idx, start_idx + num_lines if num_lines else None))
+    
+    content = ''.join(lines)
+    return content if content else ""

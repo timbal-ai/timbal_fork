@@ -17,6 +17,48 @@ from ..state import get_run_context
 logger = structlog.get_logger("timbal.tools.write")
 
 
+def _resolve_path(path: str) -> Path:
+    """Resolve a file path with context-aware security."""
+    run_context = get_run_context()
+    if run_context:
+        return run_context.resolve_cwd(path)
+    return Path(os.path.expandvars(os.path.expanduser(path))).resolve()
+
+
+def _validate_write_path(path: Path) -> None:
+    """Validate that path is suitable for writing."""
+    if path.exists() and path.is_dir():
+        raise ValueError(f"Path is a directory, not a file: {path}")
+
+
+def _read_existing_content(path: Path) -> str:
+    """Read existing file content if file exists."""
+    if not path.exists():
+        return ""
+    return path.read_bytes().decode("utf-8")
+
+
+def _generate_diff(original_content: str, new_content: str, filename: str) -> str:
+    """Generate a unified diff between original and new content."""
+    diff_lines = list(difflib.unified_diff(
+        original_content.splitlines(keepends=False),
+        new_content.splitlines(keepends=False),
+        fromfile=f"a/{filename}",
+        tofile=f"b/{filename}",
+        lineterm="",
+        n=3
+    ))
+    return "\n".join(diff_lines)
+
+
+def _update_file_state(path: Path, content: str) -> None:
+    """Update file state tracking in run context."""
+    run_context = get_run_context()
+    if run_context and hasattr(run_context, "_fs_state"):
+        new_hash = hashlib.sha256(content.encode("utf-8")).hexdigest()
+        run_context._fs_state[str(path)] = new_hash
+
+
 class Write(Tool):
 
     # TODO Add parameter to limit permissions to a specific path
@@ -36,43 +78,18 @@ class Write(Tool):
             Returns:
                 Unified diff showing the changes made (empty for new files)
             """
-            # Resolve path with base_path security if run_context exists
-            run_context = get_run_context()
-            if run_context:
-                path = run_context.resolve_cwd(path)
-            else:
-                # No run context - just expand and resolve normally
-                path = Path(os.path.expandvars(os.path.expanduser(path))).resolve()
+            resolved_path = _resolve_path(path)
+            _validate_write_path(resolved_path)
 
-            if path.exists() and path.is_dir():
-                raise ValueError(f"Path is a directory, not a file: {path}")
-
-            # Read original content if file exists for diff generation
-            original_content = ""
-            if path.exists():
-                original_bytes = path.read_bytes()
-                original_content = original_bytes.decode("utf-8")
-
-            # Generate clean, IDE-style diff with minimal context
-            diff_lines = list(difflib.unified_diff(
-                original_content.splitlines(keepends=False),
-                content.splitlines(keepends=False),
-                fromfile=f"a/{path.name}",
-                tofile=f"b/{path.name}",
-                lineterm="",
-                n=3  # 3 lines of context (standard)
-            ))
-
+            original_content = _read_existing_content(resolved_path)
+            
             # Create parent directories if they don't exist
-            path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_text(content, encoding="utf-8")
+            resolved_path.parent.mkdir(parents=True, exist_ok=True)
+            resolved_path.write_text(content, encoding="utf-8")
 
-            # Update file state tracking with new hash
-            if run_context and hasattr(run_context, "_fs_state"):
-                new_hash = hashlib.sha256(content.encode("utf-8")).hexdigest()
-                run_context._fs_state[str(path)] = new_hash
+            _update_file_state(resolved_path, content)
 
-            return "\n".join(diff_lines)
+            return _generate_diff(original_content, content, resolved_path.name)
 
 
         super().__init__(
