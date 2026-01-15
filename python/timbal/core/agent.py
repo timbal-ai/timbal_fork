@@ -42,9 +42,60 @@ from .tool_set import ToolSet
 
 logger = structlog.get_logger("timbal.core.agent")
 
-
+# Regex patterns for system prompt function resolution
 SYSTEM_PROMPT_FN_PATTERN = re.compile(r"\{[a-zA-Z0-9_]*::[a-zA-Z0-9_]+(?:::[a-zA-Z0-9_]+)*\}")
 MODIFIED_SYSTEM_PROMPT_FN_PATTERN = re.compile(r"\{[a-zA-Z0-9_]*::[a-zA-Z0-9_]+(?:::[a-zA-Z0-9_]+)*::modified\}")
+
+
+def extract_system_prompt_patterns(system_prompt: str) -> list[dict[str, Any]]:
+    """
+    Extract and validate all system prompt function patterns from a string.
+    
+    Args:
+        system_prompt: The system prompt string to analyze
+        
+    Returns:
+        List of dictionaries containing pattern information:
+        - 'pattern': The full matched pattern (e.g., '{module::function}')
+        - 'path': The path without braces (e.g., 'module::function')
+        - 'parts': List of path parts (e.g., ['module', 'function'])
+        - 'is_modified': Whether this is a modified pattern
+        - 'start': Start position in the string
+        - 'end': End position in the string
+    """
+    if not system_prompt or not isinstance(system_prompt, str):
+        return []
+    
+    patterns = []
+    for match in SYSTEM_PROMPT_FN_PATTERN.finditer(system_prompt):
+        text = match.group()
+        path = text[1:-1]  # Remove { and }
+        path_parts = path.split("::")
+        
+        patterns.append({
+            "pattern": text,
+            "path": path,
+            "parts": path_parts,
+            "is_modified": False,
+            "start": match.start(),
+            "end": match.end(),
+        })
+    
+    for match in MODIFIED_SYSTEM_PROMPT_FN_PATTERN.finditer(system_prompt):
+        text = match.group()
+        path = text[1:-1]  # Remove { and }
+        path_parts = path.split("::")
+        
+        patterns.append({
+            "pattern": text,
+            "path": path,
+            "parts": path_parts,
+            "is_modified": True,
+            "start": match.start(),
+            "end": match.end(),
+        })
+    
+    return patterns
 
 
 class AgentParams(BaseModel):
