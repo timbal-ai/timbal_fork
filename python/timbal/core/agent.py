@@ -44,6 +44,7 @@ logger = structlog.get_logger("timbal.core.agent")
 
 
 SYSTEM_PROMPT_FN_PATTERN = re.compile(r"\{[a-zA-Z0-9_]*::[a-zA-Z0-9_]+(?:::[a-zA-Z0-9_]+)*\}")
+MODIFIED_SYSTEM_PROMPT_FN_PATTERN = re.compile(r"\{[a-zA-Z0-9_]*::[a-zA-Z0-9_]+(?:::[a-zA-Z0-9_]+)*::modified\}")
 
 
 class AgentParams(BaseModel):
