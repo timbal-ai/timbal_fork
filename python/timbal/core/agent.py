@@ -1016,6 +1016,142 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
             "agent_path": self._path,
         }
 
+    def get_tool_by_name(self, tool_name: str) -> Tool | None:
+        """
+        Get a tool instance by its name.
+        
+        Args:
+            tool_name: Name of the tool to retrieve
+            
+        Returns:
+            Tool instance if found, None otherwise
+        """
+        for tool in self.tools:
+            if isinstance(tool, ToolSet):
+                continue
+            if isinstance(tool, Runnable) and tool.name == tool_name:
+                return tool
+            elif isinstance(tool, dict) and tool.get("name") == tool_name:
+                return None
+        return None
+
+    def get_tools_by_type(self, tool_type: type) -> list[Tool]:
+        """
+        Get all tools that are instances of a specific type.
+        
+        Args:
+            tool_type: Type to filter by (e.g., Skill, Tool)
+            
+        Returns:
+            List of tools matching the type
+        """
+        tools = []
+        for tool in self.tools:
+            if isinstance(tool, tool_type):
+                tools.append(tool)
+        return tools
+
+    def get_commands_mapping(self) -> dict[str, Tool]:
+        """
+        Get a mapping of command strings to tool instances.
+        
+        Returns:
+            Dictionary mapping command strings to Tool instances
+        """
+        commands = {}
+        for tool in self.tools:
+            if isinstance(tool, ToolSet):
+                continue
+            if isinstance(tool, Runnable) and tool.command:
+                commands[tool.command] = tool
+        return commands
+
+    def validate_tool_configurations(self) -> dict[str, Any]:
+        """
+        Validate all tool configurations in the agent.
+        
+        Returns:
+            Dictionary containing:
+            - is_valid: Whether all tools are valid
+            - tool_validations: List of validation results for each tool
+            - errors: List of global errors
+            - warnings: List of global warnings
+        """
+        errors = []
+        warnings = []
+        tool_validations = []
+        
+        for tool in self.tools:
+            if isinstance(tool, ToolSet):
+                continue
+            
+            if isinstance(tool, Runnable):
+                if hasattr(tool, "validate_handler_signature"):
+                    validation = tool.validate_handler_signature()
+                    tool_validations.append({
+                        "tool_name": tool.name,
+                        "validation": validation,
+                    })
+                    if not validation["is_valid"]:
+                        errors.extend([f"{tool.name}: {e}" for e in validation["errors"]])
+                    warnings.extend([f"{tool.name}: {w}" for w in validation["warnings"]])
+        
+        # Check for duplicate commands
+        commands = self.get_commands_mapping()
+        if len(commands) != len(set(commands.keys())):
+            duplicate_commands = [cmd for cmd in commands.keys() if list(commands.keys()).count(cmd) > 1]
+            errors.append(f"Duplicate commands found: {set(duplicate_commands)}")
+        
+        return {
+            "is_valid": len(errors) == 0,
+            "tool_validations": tool_validations,
+            "errors": errors,
+            "warnings": warnings,
+        }
+
+    def get_model_requirements(self) -> dict[str, Any]:
+        """
+        Get model-specific requirements and recommendations.
+        
+        Returns:
+            Dictionary containing:
+            - provider: Model provider
+            - requires_max_tokens: Whether max_tokens is required
+            - recommended_max_tokens: Recommended max_tokens value if applicable
+            - supports_tools: Whether the model supports tool calling
+            - supports_streaming: Whether the model supports streaming
+        """
+        if not self.model:
+            return {
+                "provider": None,
+                "requires_max_tokens": False,
+                "recommended_max_tokens": None,
+                "supports_tools": False,
+                "supports_streaming": False,
+            }
+        
+        model_validation = validate_model_format(self.model)
+        if not model_validation["is_valid"]:
+            return {
+                "provider": None,
+                "requires_max_tokens": False,
+                "recommended_max_tokens": None,
+                "supports_tools": False,
+                "supports_streaming": False,
+            }
+        
+        provider = model_validation["provider"]
+        requires_max_tokens = provider == "anthropic"
+        recommended_max_tokens = 4096 if provider == "anthropic" else None
+        
+        return {
+            "provider": provider,
+            "requires_max_tokens": requires_max_tokens,
+            "recommended_max_tokens": recommended_max_tokens,
+            "supports_tools": True,
+            "supports_streaming": True,
+        }
+
     async def handler(self, **kwargs: Any) -> AsyncGenerator[Any, None]:
         """Execute the autonomous agent loop."""
         run_context = get_run_context()
