@@ -408,6 +408,108 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
 
         return system_prompt
 
+    def validate_system_prompt_patterns(self) -> list[dict[str, Any]]:
+        """
+        Validate and extract all system prompt function patterns.
+        
+        Returns:
+            List of pattern dictionaries with validation information.
+            Raises ValueError if any patterns are invalid.
+        """
+        if not self.system_prompt or not isinstance(self.system_prompt, str):
+            return []
+        
+        patterns = extract_system_prompt_patterns(self.system_prompt)
+        
+        for pattern_info in patterns:
+            path_parts = pattern_info["parts"]
+            if len(path_parts) < 2:
+                raise ValueError(
+                    f"Invalid path format for system prompt pattern '{pattern_info['pattern']}': "
+                    f"expected at least 2 parts separated by '::', got {len(path_parts)}"
+                )
+        
+        if patterns:
+            logger.debug(
+                f"Found {len(patterns)} system prompt pattern(s)",
+                patterns=[p["pattern"] for p in patterns],
+            )
+        
+        return patterns
+
+    def get_tool_names(self) -> list[str]:
+        """
+        Get a list of all available tool names.
+        
+        Returns:
+            List of tool names (strings) available to this agent.
+        """
+        names = []
+        for tool in self.tools:
+            if isinstance(tool, ToolSet):
+                continue
+            if isinstance(tool, Runnable):
+                names.append(tool.name)
+            elif isinstance(tool, dict):
+                names.append(tool.get("name", "unknown"))
+            else:
+                names.append(getattr(tool, "__name__", "unknown"))
+        return names
+
+    def has_tool(self, tool_name: str) -> bool:
+        """
+        Check if a tool with the given name exists.
+        
+        Args:
+            tool_name: Name of the tool to check
+            
+        Returns:
+            True if the tool exists, False otherwise
+        """
+        return tool_name in self.get_tool_names()
+
+    def get_tool_statistics(self) -> dict[str, Any]:
+        """
+        Get statistics about the agent's tools configuration.
+        
+        Returns:
+            Dictionary containing:
+            - total_tools: Total number of tools
+            - tool_names: List of all tool names
+            - toolsets_count: Number of ToolSet instances
+            - skills_count: Number of Skill instances
+            - commands_count: Number of tools with commands
+        """
+        tool_names = []
+        toolsets_count = 0
+        skills_count = 0
+        commands_count = 0
+        
+        for tool in self.tools:
+            if isinstance(tool, ToolSet):
+                toolsets_count += 1
+                if isinstance(tool, Skill):
+                    skills_count += 1
+                continue
+            
+            if isinstance(tool, Runnable):
+                tool_names.append(tool.name)
+                if hasattr(tool, "command") and tool.command:
+                    commands_count += 1
+            elif isinstance(tool, dict):
+                name = tool.get("name", "unknown")
+                tool_names.append(name)
+                if tool.get("command"):
+                    commands_count += 1
+        
+        return {
+            "total_tools": len(tool_names),
+            "tool_names": tool_names,
+            "toolsets_count": toolsets_count,
+            "skills_count": skills_count,
+            "commands_count": commands_count,
+        }
+
     async def resolve_memory(self) -> None:
         """Resolve conversation memory from previous agent trace."""
         run_context = get_run_context()
