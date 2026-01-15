@@ -98,6 +98,71 @@ def extract_system_prompt_patterns(system_prompt: str) -> list[dict[str, Any]]:
     return patterns
 
 
+def validate_model_format(model: str) -> dict[str, Any]:
+    """
+    Validate model format and extract provider information.
+    
+    Args:
+        model: Model identifier string (e.g., 'openai/gpt-4o-mini', 'anthropic/claude-haiku-4-5')
+        
+    Returns:
+        Dictionary containing:
+        - is_valid: Whether the model format is valid
+        - provider: Model provider (e.g., 'openai', 'anthropic')
+        - model_name: Model name without provider
+        - error: Error message if invalid
+    """
+    if not model or not isinstance(model, str):
+        return {
+            "is_valid": False,
+            "provider": None,
+            "model_name": None,
+            "error": "Model must be a non-empty string",
+        }
+    
+    if "/" not in model:
+        return {
+            "is_valid": False,
+            "provider": None,
+            "model_name": None,
+            "error": f"Invalid model format: '{model}'. Expected 'provider/model-name'",
+        }
+    
+    try:
+        provider, model_name = model.split("/", 1)
+        if not provider or not model_name:
+            return {
+                "is_valid": False,
+                "provider": None,
+                "model_name": None,
+                "error": "Provider and model name cannot be empty",
+            }
+        
+        valid_providers = ["anthropic", "openai"]
+        if provider not in valid_providers:
+            return {
+                "is_valid": True,
+                "provider": provider,
+                "model_name": model_name,
+                "error": None,
+                "warning": f"Unknown provider '{provider}'. Known providers: {valid_providers}",
+            }
+        
+        return {
+            "is_valid": True,
+            "provider": provider,
+            "model_name": model_name,
+            "error": None,
+        }
+    except ValueError:
+        return {
+            "is_valid": False,
+            "provider": None,
+            "model_name": None,
+            "error": f"Invalid model format: '{model}'",
+        }
+
+
 class AgentParams(BaseModel):
     """Input parameters for Agent execution. Use either 'prompt' or 'messages', not both."""
 
@@ -362,6 +427,132 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
         self._is_gen = False
         self._is_async_gen = True
 
+    def validate_configuration(self) -> dict[str, Any]:
+        """
+        Validate agent configuration and return validation results.
+        
+        Returns:
+            Dictionary containing validation results:
+            - is_valid: Whether configuration is valid
+            - errors: List of error messages
+            - warnings: List of warning messages
+            - model_info: Information about the model configuration
+        """
+        errors = []
+        warnings = []
+        
+        # Validate model
+        if not self.model:
+            errors.append("Model is required")
+        else:
+            try:
+                model_provider, model_name = self.model.split("/", 1)
+                if model_provider not in ["anthropic", "openai"]:
+                    warnings.append(f"Unknown model provider: {model_provider}")
+            except ValueError:
+                errors.append(f"Invalid model format: {self.model}. Expected 'provider/model-name'")
+        
+        # Validate max_iter
+        if self.max_iter < 1:
+            errors.append("max_iter must be at least 1")
+        elif self.max_iter > 100:
+            warnings.append(f"max_iter is very high ({self.max_iter}), this may cause long execution times")
+        
+        # Validate skills_path if provided
+        if self.skills_path is not None:
+            skills_path = Path(self.skills_path).expanduser().resolve()
+            if not skills_path.exists():
+                errors.append(f"Skills path does not exist: {self.skills_path}")
+            elif not skills_path.is_dir():
+                errors.append(f"Skills path is not a directory: {self.skills_path}")
+        
+        # Validate system prompt patterns
+        if self.system_prompt and isinstance(self.system_prompt, str):
+            try:
+                patterns = extract_system_prompt_patterns(self.system_prompt)
+                if patterns:
+                    logger.debug(f"Found {len(patterns)} system prompt patterns")
+            except Exception as e:
+                warnings.append(f"Error parsing system prompt patterns: {e}")
+        
+        # Validate tools
+        tool_names = self.get_tool_names()
+        if len(tool_names) != len(set(tool_names)):
+            duplicates = [name for name in tool_names if tool_names.count(name) > 1]
+            errors.append(f"Duplicate tool names found: {set(duplicates)}")
+        
+        model_info = {}
+        if self.model:
+            try:
+                model_provider, model_name = self.model.split("/", 1)
+                model_info = {
+                    "provider": model_provider,
+                    "name": model_name,
+                    "full_model": self.model,
+                }
+            except ValueError:
+                pass
+        
+        return {
+            "is_valid": len(errors) == 0,
+            "errors": errors,
+            "warnings": warnings,
+            "model_info": model_info,
+        }
+
+    def get_iteration_status(self, current_iteration: int) -> dict[str, Any]:
+        """
+        Get status information about the current iteration.
+        
+        Args:
+            current_iteration: Current iteration number (0-indexed)
+            
+        Returns:
+            Dictionary containing:
+            - current_iteration: Current iteration number
+            - max_iterations: Maximum allowed iterations
+            - remaining_iterations: Number of iterations remaining
+            - progress_percentage: Progress as percentage
+            - is_max_reached: Whether max iterations have been reached
+        """
+        remaining = max(0, self.max_iter - current_iteration)
+        progress = min(100, (current_iteration / self.max_iter * 100)) if self.max_iter > 0 else 0
+        
+        return {
+            "current_iteration": current_iteration,
+            "max_iterations": self.max_iter,
+            "remaining_iterations": remaining,
+            "progress_percentage": round(progress, 2),
+            "is_max_reached": current_iteration >= self.max_iter,
+        }
+
+    def get_agent_summary(self) -> dict[str, Any]:
+        """
+        Get a comprehensive summary of the agent's configuration and state.
+        
+        Returns:
+            Dictionary containing agent summary information.
+        """
+        tool_stats = self.get_tool_statistics()
+        config_validation = self.validate_configuration()
+        
+        summary = {
+            "name": self.name,
+            "model": self.model,
+            "max_iter": self.max_iter,
+            "has_system_prompt": self.system_prompt is not None,
+            "has_skills_path": self.skills_path is not None,
+            "has_output_model": self.output_model is not None,
+            "tool_statistics": tool_stats,
+            "configuration_validation": config_validation,
+        }
+        
+        if self.system_prompt and isinstance(self.system_prompt, str):
+            patterns = extract_system_prompt_patterns(self.system_prompt)
+            summary["system_prompt_patterns_count"] = len(patterns)
+        
+        return summary
+
     @override
     def nest(self, parent_path: str) -> None:
         """See base class."""
@@ -613,6 +804,45 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
                 )
         current_span.memory = memory + current_span.memory
 
+    def get_memory_statistics(self) -> dict[str, Any] | None:
+        """
+        Get statistics about the current agent memory.
+        
+        Returns:
+            Dictionary containing memory statistics:
+            - message_count: Total number of messages
+            - user_messages: Number of user messages
+            - assistant_messages: Number of assistant messages
+            - tool_messages: Number of tool result messages
+            - has_memory: Whether memory exists
+            None if run context is not available.
+        """
+        run_context = get_run_context()
+        if run_context is None:
+            return None
+        
+        current_span = run_context.current_span()
+        if not current_span.memory:
+            return {
+                "has_memory": False,
+                "message_count": 0,
+                "user_messages": 0,
+                "assistant_messages": 0,
+                "tool_messages": 0,
+            }
+        
+        user_count = sum(1 for msg in current_span.memory if msg.role == "user")
+        assistant_count = sum(1 for msg in current_span.memory if msg.role == "assistant")
+        tool_count = sum(1 for msg in current_span.memory if msg.role == "tool")
+        
+        return {
+            "has_memory": True,
+            "message_count": len(current_span.memory),
+            "user_messages": user_count,
+            "assistant_messages": assistant_count,
+            "tool_messages": tool_count,
+        }
+
     async def _resolve_tools(self, i: int) -> tuple[list[Tool], dict[str, Tool]]:
         """Resolve the tools to be provided to the LLM."""
         if i >= self.max_iter:
@@ -695,6 +925,96 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
                     task.cancel()
             if tasks:
                 await asyncio.gather(*tasks, return_exceptions=True)
+
+    def analyze_tool_calls_from_memory(self) -> dict[str, Any]:
+        """
+        Analyze tool calls from the current memory state.
+        
+        Returns:
+            Dictionary containing:
+            - total_tool_calls: Total number of tool calls
+            - tool_call_names: List of tool names that were called
+            - tool_call_counts: Dictionary mapping tool names to call counts
+            - pending_tool_calls: List of tool calls without results
+        """
+        run_context = get_run_context()
+        if run_context is None:
+            return {
+                "total_tool_calls": 0,
+                "tool_call_names": [],
+                "tool_call_counts": {},
+                "pending_tool_calls": [],
+            }
+        
+        current_span = run_context.current_span()
+        if not current_span.memory:
+            return {
+                "total_tool_calls": 0,
+                "tool_call_names": [],
+                "tool_call_counts": {},
+                "pending_tool_calls": [],
+            }
+        
+        tool_call_ids = set()
+        tool_call_counts = {}
+        tool_call_names = []
+        pending_tool_calls = []
+        
+        for message in current_span.memory:
+            if message.role == "assistant":
+                for content in message.content:
+                    if isinstance(content, ToolUseContent):
+                        tool_call_ids.add(content.id)
+                        tool_name = content.name
+                        tool_call_names.append(tool_name)
+                        tool_call_counts[tool_name] = tool_call_counts.get(tool_name, 0) + 1
+                        pending_tool_calls.append({
+                            "id": content.id,
+                            "name": tool_name,
+                            "input": content.input,
+                        })
+            elif message.role == "tool":
+                for content in message.content:
+                    if isinstance(content, dict) and content.get("type") == "tool_result":
+                        tool_call_id = content.get("id")
+                        if tool_call_id in tool_call_ids:
+                            tool_call_ids.remove(tool_call_id)
+                            pending_tool_calls = [tc for tc in pending_tool_calls if tc["id"] != tool_call_id]
+        
+        return {
+            "total_tool_calls": len(tool_call_names),
+            "tool_call_names": list(set(tool_call_names)),
+            "tool_call_counts": tool_call_counts,
+            "pending_tool_calls": pending_tool_calls,
+        }
+
+    def get_execution_state(self) -> dict[str, Any]:
+        """
+        Get the current execution state of the agent.
+        
+        Returns:
+            Dictionary containing execution state information.
+        """
+        run_context = get_run_context()
+        if run_context is None:
+            return {
+                "has_run_context": False,
+                "is_running": False,
+            }
+        
+        current_span = run_context.current_span()
+        memory_stats = self.get_memory_statistics()
+        tool_analysis = self.analyze_tool_calls_from_memory()
+        
+        return {
+            "has_run_context": True,
+            "is_running": current_span is not None,
+            "run_id": run_context.id if run_context else None,
+            "parent_id": run_context.parent_id if run_context else None,
+            "memory_statistics": memory_stats,
+            "tool_analysis": tool_analysis,
+            "agent_path": self._path,
+        }
 
     async def handler(self, **kwargs: Any) -> AsyncGenerator[Any, None]:
         """Execute the autonomous agent loop."""
