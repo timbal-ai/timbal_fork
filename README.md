@@ -7,6 +7,7 @@ Timbal is an open-source python framework for building reliable AI applications,
 ## Overview
 
 Timbal provides two main patterns for building AI applications:
+bug fix
 
 ### 1. Agents
 Autonomous AI agents that orchestrate LLM interactions with tool calling.
