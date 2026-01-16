@@ -126,71 +126,17 @@ class Edit(Tool):
             Returns:
                 Unified diff showing the changes made
             """
-            if old_string == new_string:
-                raise ValueError("No changes made - old_string and new_string are identical")
+            resolved_path = _resolve_path(path)
+            _validate_edit_inputs(old_string, new_string, resolved_path)
+            _verify_file_state(resolved_path)
 
-            run_context = get_run_context()
-            # Resolve path with base_path security if run_context exists
-            if run_context:
-                path = run_context.resolve_cwd(path)
-            else:
-                # No run context - just expand and resolve normally
-                path = Path(os.path.expandvars(os.path.expanduser(path))).resolve()
+            original_content = resolved_path.read_bytes().decode("utf-8")
+            new_content = _perform_replacement(original_content, old_string, new_string, replace_all)
 
-            if not path.exists():
-                raise FileNotFoundError(f"File does not exist: {path}")
-            if path.is_dir():
-                raise ValueError(f"Path is a directory, not a file: {path}")
+            resolved_path.write_text(new_content, encoding="utf-8")
+            _update_file_state(resolved_path, new_content)
 
-            # Verify file state tracking BEFORE reading - fail fast
-            # This is a security feature, we don't enforce the user to keep track of the fs state in the run context
-            if run_context and hasattr(run_context, "_fs_state"):
-                # Check if file has been read in this conversation
-                if str(path) not in run_context._fs_state:
-                    raise FileNotReadError(
-                        f"Cannot edit {path} - file has not been read in this conversation. "
-                        f"Please read the file first to understand its current state."
-                    )
-
-            original_bytes = path.read_bytes()
-            # Verify file hasn't changed since last read
-            # This is a security feature, we don't enforce the user to keep track of the fs state in the run context
-            if run_context and hasattr(run_context, "_fs_state"):
-                current_hash = hashlib.sha256(original_bytes).hexdigest()
-                stored_hash = run_context._fs_state[str(path)]
-                if stored_hash and current_hash != stored_hash:
-                    raise FileModifiedError(
-                        f"Cannot edit {path} - file has been modified since you last read it. "
-                        f"Please read the file again to see the current state."
-                    )
-
-            original_content = original_bytes.decode("utf-8")
-            if old_string not in original_content:
-                raise ValueError(f"String not found in file: '{old_string}'")
-
-            if replace_all:
-                new_content = original_content.replace(old_string, new_string)
-            else:
-                new_content = original_content.replace(old_string, new_string, 1)
-
-            # Generate clean, IDE-style diff with minimal context
-            diff_lines = list(difflib.unified_diff(
-                original_content.splitlines(keepends=False),
-                new_content.splitlines(keepends=False),
-                fromfile=f"a/{path.name}",
-                tofile=f"b/{path.name}",
-                lineterm="",
-                n=3  # 3 lines of context (standard)
-            ))
-
-            path.write_text(new_content, encoding="utf-8")
-            
-            # Update file state tracking with new hash
-            if run_context and hasattr(run_context, "_fs_state"):
-                new_hash = hashlib.sha256(new_content.encode("utf-8")).hexdigest()
-                run_context._fs_state[str(path)] = new_hash
-
-            return "\n".join(diff_lines)
+            return _generate_edit_diff(original_content, new_content, resolved_path.name)
 
         super().__init__(
             name="edit",
